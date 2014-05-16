@@ -17,7 +17,7 @@ def render_psfs(psf_model, shifts, patch_shape, psf_grid, k=3):
     x = np.linspace(-dx, dx, patch_shape[0])
     y = np.linspace(-dy, dy, patch_shape[1])
 
-    # NOTE - transpose of interp eval.
+    # NOTE - transpose of interp evaluation.
     for i in range(psfs.shape[0]):
         psfs[i] = interp_func(x + shifts[i, 0], y + shifts[i, 1]).T.ravel()
 

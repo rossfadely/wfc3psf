@@ -17,35 +17,41 @@ def evaluate((data, dq, shifts, psf_model, parms, core)):
 
     psfs = render_psfs(psf_model, shifts, patch_shape, parms.psf_grid)
 
-    if parms.return_flux:
-        fluxes = np.zeros(data.shape[0])
+    if parms.return_parms:
+        if parms.background == 'constant':            
+            fit_parms = np.zeros((data.shape[0], 2))
+        else:
+            fit_parms = np.zeros((data.shape[0], 4))
+        masks = np.zeros_like(data, dtype=np.bool)
 
-    ssqe = np.zeros_like(data) * parms.max_ssqe
+    nll = np.zeros_like(data)
     for i in range(data.shape[0]):
-        flux, bkg_parms, bkg, ind = fit_single_patch((data[i], psfs[i],
+        fitparms, bkg, ind = fit_single_patch((data[i], psfs[i],
                                                       dq[i], parms))
-        model = flux * psfs[i] + bkg
+        model = fitparms[0] * psfs[i] + bkg
 
         # chi-squared like term
-        if model[ind].size > min_pixels:
-            ssqe[i, ind] = eval_nll(data[i][ind], model[ind], parms)
+        if model[ind].size >= min_pixels:
+            nll[i, ind] = eval_nll(data[i][ind], model[ind], parms)
         else:
-            ssqe[i] = parms.max_ssqe
+            nll[i] = parms.max_nll
 
         if parms.plot_data:
+            # get pre-clip nll
             ind = parms.flags.ravel() != 1
-            old_ssqe = np.zeros(patch_shape[0] * patch_shape[1])
-            old_ssqe[ind] = data_loss(data[i][ind], parms.old_model[ind],
-                                      parms.old_bkg[ind], parms)
-            plot_data(i, data[i], model, bkg, ssqe[i], old_ssqe, parms)
+            old_nll = np.zeros(patch_shape[0] * patch_shape[1])
+            old_nll[ind] = eval_nll(data[i][ind], parms.old_model[ind], parms)
+            # plot the data
+            plot_data(i, data[i], model, bkg, nll[i], old_nll, parms)
 
-        if parms.return_flux:
-            fluxes[i] = flux
+        if parms.return_parms:
+            fit_parms[i] = fitparms
+            masks[i] = ind
 
-    if parms.return_flux:
-        return ssqe, fluxes
+    if parms.return_parms:
+        return nll, fit_parms, masks
     else:
-        return ssqe
+        return nll
 
 def fit_single_patch((data, psf, dq, parms)):
     """
@@ -123,9 +129,7 @@ def fit_single_patch((data, psf, dq, parms)):
                 fit_parms = np.zeros(A.shape[1])
             bkg = make_background(data, A, fit_parms, background)
 
-        return fit_parms[0], fit_parms[1:], bkg, ind
-    else:
-        return fit_parms[0], None, bkg, ind
+    return fit_parms, bkg, ind
 
 def make_background(data, A, fit_parms, background):
     """
@@ -144,60 +148,3 @@ def eval_nll(data, model, parms):
     var = parms.floor + parms.gain * np.abs(model)
     nll = 0.5 * (np.log(var) + (data - model) ** 2. / var)
     return nll
-
-def render_models(data, dq, psf_model, shifts, floor, gain, clip_parms=None,
-                  background='constant', loss_kind='nll-model'):
-    """
-    Render a set of models
-    """
-    loss_kind = 'sqe'
-    patch_shape = (data.shape[1], data.shape[2])
-    psf_grid, patch_grid = get_grids(patch_shape, psf_model.shape)
-
-    rendered_psfs = render_psfs(psf_model, shifts, data.shape, psf_grid[0],
-                                psf_grid[1])
-    xpg, ypg = patch_grid[0], patch_grid[1]
-
-    ssqe = np.zeros(data.shape[0])
-    models = np.zeros((data.shape[0], data.shape[1] * data.shape[2]))
-
-    for i in range(data.shape[0]):
-        datum = data[i].ravel()
-        psf = rendered_psfs[i].ravel()
-        flat = np.ones_like(datum) # fix me!!!
-        flux, bkg_parms, bkg, ind = fit_single_patch((datum,
-                                                      psf, flat,
-                                                      dq[i].ravel(),
-                                                      background, floor,
-                                                      gain, clip_parms))
-        model = flat * (flux * psf + bkg)
-        s = data_loss(datum[ind], model[ind], loss_kind, floor, gain)
-        ssqe[i] = np.sum(s)
-        models[i] = model
-
-    return models, ssqe
-
-def diagnostic_plot(data, model, floor, gain, patch_shape=(5, 5)):
-    """
-    Quick and dirty plot to check things are ok
-    """
-    import matplotlib.pyplot as pl
-    f = pl.figure(figsize=(12, 4))
-    pl.subplot(131)
-    pl.imshow(data.reshape(patch_shape), interpolation='nearest',
-              origin='lower')
-    pl.colorbar()
-    pl.subplot(132)
-    pl.imshow(model.reshape(patch_shape), interpolation='nearest',
-              origin='lower')
-    pl.colorbar()
-    pl.subplot(133)
-    if floor is None:
-        var = 1.
-    else:
-        var = floor + gain * np.abs(model)
-    pl.imshow(((data - model) ** 2. / var).reshape(patch_shape),
-              interpolation='nearest', origin='lower')
-    pl.colorbar()
-    f.savefig('../plots/foo.png')
-    assert 0

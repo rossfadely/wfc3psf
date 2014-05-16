@@ -1,97 +1,112 @@
 import multiprocessing
 import numpy as np
 
-from patch_fitting import evaluate
+from patch_fitting import eval_nll, make_background, evaluate
+from generation import render_psfs
 
-def one_data_derivative((datum, dq, shift, psf_model, old_ssqe, old_reg,
-                         parms)):
-    """
-    Calculate the derivative for a single datum using forward differencing.
-    """
-    counts = np.zeros_like(psf_model)
-    derivatives = np.zeros_like(psf_model)
-    for i in range(parms.psf_model_shape[0]):
-        for j in range(parms.psf_model_shape[1]):
-            temp_psf = psf_model.copy()
-            temp_psf[i, j] += parms.h
-
-            new_ssqe = evaluate((datum, dq, shift, temp_psf, parms, False))
-            new_reg = local_regularization(temp_psf, parms.eps, idx=(i, j))
-
-            derivatives[i, j] = np.sum(new_ssqe - old_ssqe)
-            derivatives[i, j] += new_reg - old_reg[i, j]
-
-    ind = np.where(derivatives != 0.0)
-    counts[ind] += 1.
-
-    return counts, derivatives
-
-def one_parm_derivative(((i, j), data, dq, shift, psf_model, old_ssqe, old_reg,
-                         parms)):
-    """
-    Calculate the derivative for a single model parameter using forward
-    differencing.
-    """
-    temp_psf = psf_model.copy()
-    temp_psf[i, j] += parms.h
-
-    new_ssqe = evaluate((data, dq, shift, temp_psf, parms, False))
-    new_reg = local_regularization(temp_psf, parms.eps, idx=(i, j))
-
-    derivative = np.mean(new_ssqe - old_ssqe)
-    derivative += new_reg - old_reg
-
-    return derivative / parms.h
-
-def get_derivatives(data, dq, shifts, psf_model, old_costs, old_reg, parms):
+def get_derivatives(data, shifts, psf_model, old_nlls, fit_parms, masks, parms):
     """
     Calculate the derivatives of the objective (in patch_fitting)
     with respect to the psf model.
     """
-    assert (len(data.shape) == 2) & (len(dq.shape) == 2), \
-        'Data should be the (un)raveled patch'
+    # derivative of regularization term
+    reg_term, old_reg = regularization_derivative(psf_model, parms)
 
-    # Map to the processes
+    # calculate derivative of nll term
     pool = multiprocessing.Pool(parms.Nthreads)
     mapfn = pool.map
 
-    # calculate derivative, using specified method across the processes
-    if parms.deriv_type == 'data':
-        argslist = [None] * parms.Ndata
-        for i in range(parms.Ndata):
-            argslist[i] = (data[None, i], dq[None, i], shifts[None, i],
-                           psf_model, old_costs[i], old_reg, parms)
-        results = list(mapfn(one_data_derivative, [args for args in argslist]))
+    argslist = [None] * parms.Ndata
+    for i in range(parms.Ndata):
+        argslist[i] = (data[i], shifts[None, i], psf_model, old_nlls[i],
+                       fit_parms[i], masks[i], parms)
 
-        total_counts = np.zeros_like(psf_model)
-        total_derivatives = np.zeros_like(psf_model)
-        for i in range(parms.Ndata):
-            total_counts += results[i][0]
-            total_derivatives += results[i][1]
+    results = list(mapfn(one_datum_nll_diff, [args for args in argslist]))
+    
+    Neff = 0
+    nll_diff_sums = np.zeros_like(psf_model)
+    for i in range(parms.Ndata):
+        nll_diff_sums += results[i][0]
+        if np.any(results[i][0] != 0.0):
+            Neff += 1
 
-        derivatives = total_derivatives / parms.Ndata / parms.h
-
-    if parms.deriv_type == 'parameter':
-        assert 0, 'possible bug at moment'
-        argslist = [None] * parms.psf_model_shape[0] * parms.psf_model_shape[1]
-        for i in range(parms.psf_model_shape[0]):
-            for j in range(parms.psf_model_shape[1]):
-                idx = i * parms.psf_model_shape[1] + j
-                argslist[idx] = ((i, j), data, dq, shifts, psf_model, old_costs,
-                                 old_reg[i, j], parms)
-        results = np.array((mapfn(one_parm_derivative,
-                                  [args for args in argslist])))
-
-        derivatives = results.reshape(parms.psf_model_shape)
+    derivatives = nll_diff_sums / Neff / parms.h + reg_term
 
     # tidy up
     pool.close()
     pool.terminate()
     pool.join()
 
-    return derivatives
+    return derivatives, old_reg
 
-def local_regularization(psf_model, eps, idx=None):
+def regularization_derivative(psf_model, parms):
+    """
+    Compute derivative of regularization wrt the psf.
+    """
+    # old regularization
+    old_reg = local_regularization((psf_model, parms.eps, None))
+
+    # Map to the processes
+    pool = multiprocessing.Pool(parms.Nthreads)
+    mapfn = pool.map
+
+    # compute perturbed reg
+    argslist = [None] * parms.psf_model_shape[0] * parms.psf_model_shape[1]
+    for i in range(parms.psf_model_shape[0]):
+        for j in range(parms.psf_model_shape[1]):
+            idx = i * parms.psf_model_shape[1] + j
+            tmp_psf = psf_model.copy()
+            tmp_psf[i, j] += parms.h
+            argslist[idx] = (tmp_psf, parms.eps, (i, j))
+    new_reg = np.array((mapfn(local_regularization,
+                              [args for args in argslist])))
+
+    # tidy up
+    pool.close()
+    pool.terminate()
+    pool.join()
+
+    return (new_reg.reshape(parms.psf_model_shape) - old_reg) / parms.h, old_reg
+
+def one_datum_nll_diff((datum, shift, psf_model, old_nll, fitparms, mask,
+                        parms)):
+    """
+    Calculate the derivative for a single datum using forward differencing.
+    """
+    # if not enough good pixels, discard patch
+    min_pixels = np.ceil(parms.min_frac * datum.size)
+    if datum[mask].size < min_pixels:
+        return np.zeros_like(psf_model)
+
+    # background model
+    if parms.background == 'linear':
+        N = np.sqrt(psf.size).astype(np.int)
+        x, y = np.meshgrid(range(N), range(N))
+        A = np.vstack((psf, np.ones_like(psf),
+                       x.ravel(), y.ravel())).T
+        bkg = make_background(datum, A, fitparms, parms.background)
+    else:
+        bkg = fitparms[-1]
+
+    # calculate the difference in nll, tweaking each psf parm.
+    nll_diff = np.zeros_like(psf_model)
+    for i in range(parms.psf_model_shape[0]):
+        for j in range(parms.psf_model_shape[1]):
+            temp_psf = psf_model.copy()
+            temp_psf[i, j] += parms.h
+
+            psf = render_psfs(temp_psf, shift, parms.patch_shape,
+                              parms.psf_grid)[0]
+
+            model = fitparms[0] * psf + bkg
+            new_nll = eval_nll(datum[mask], model[mask], parms)
+            if np.sum(new_nll)>=parms.max_nll: assert 0, 'whoa'
+            if np.sum(old_nll)>=parms.max_nll: assert 0, 'whoa old'
+            nll_diff[i, j] = np.sum(new_nll - old_nll[mask])
+
+    return nll_diff
+
+def local_regularization((psf_model, eps, idx)):
     """
     Calculate the local regularization for each pixel.
     """

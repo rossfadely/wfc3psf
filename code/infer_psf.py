@@ -15,11 +15,11 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
                 plot=False, clip_parms=None, final_clip=[1, 3.], q=1.0,
                 clip_shifts=False, h=1.4901161193847656e-08, Nplot=20,
                 small=1.e-6, Nsearch=64, search_rate=0.125, search_scale=1e-4,
-                shift_test_thresh=0.475, min_frac=0.5, max_ssqe=1.e10):
+                shift_test_thresh=0.475, min_frac=0.5, max_nll=1.e10):
     """
     Patch fitting routines for BallPeenHammer.
     """
-    assert background in [None, 'constant', 'linear']
+    assert background in ['constant', 'linear']
     assert np.mod(patch_shape[0], 2) == 1, 'Patch shape[0] must be odd'
     assert np.mod(patch_shape[1], 2) == 1, 'Patch shape[1] must be odd'
     assert np.mod(core_size, 2) == 1, 'Core size must be odd'
@@ -31,7 +31,7 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
 
     # set parameters
     parms = InferenceParms(h, q, eps, tol, gain, plot, floor, data.shape[0],
-                           Nplot, small, Nsearch, id_start, max_ssqe, min_frac,
+                           Nplot, small, Nsearch, id_start, max_nll, min_frac,
                            Nthreads, core_size, background, None,
                            patch_shape, search_rate, plotfilebase,
                            search_scale, ini_psf.shape, shift_test_thresh)
@@ -61,17 +61,17 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
 
             if kind == 'shifts':
                 parms.clip_parms = None
-                shifts, ssqe = update_shifts(data[:, parms.core_ind],
+                shifts, nll = update_shifts(data[:, parms.core_ind],
                                              dq[:, parms.core_ind],
                                              current_psf, ref_shifts, parms)
 
                 if parms.iter == 0:
                     ref_shifts = shifts.copy()
 
-                print 'Shift step 1 done ssqe, total: ', ssqe.sum()
-                print 'Shift step 1 done ssqe, min: ', ssqe.min()
-                print 'Shift step 1 done ssqe, median: ', np.median(ssqe)
-                print 'Shift step 1 done ssqe, max: ', ssqe.max()
+                print 'Shift step 1 done nll, total: ', nll.sum()
+                print 'Shift step 1 done nll, min: ', nll.min()
+                print 'Shift step 1 done nll, median: ', np.median(nll)
+                print 'Shift step 1 done nll, max: ', nll.max()
 
                 if (trim_frac is not None) & (mask.size > Nmin):
                     assert trim_frac > 0., 'trim_frac must be positive or None'
@@ -80,7 +80,7 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
                         Ntrim = mask.size - Nmin
 
                     # sort and trim the arrays
-                    ind = np.sort(np.argsort(ssqe)[:-Ntrim])
+                    ind = np.sort(np.argsort(nll)[:-Ntrim])
                     dq = dq[ind]
                     data = data[ind]
                     mask = mask[ind]
@@ -89,36 +89,36 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
                     parms.data_ids = parms.data_ids[ind]
 
                     # re-run shifts
-                    shifts, ssqe = update_shifts(data[:, parms.core_ind],
+                    shifts, nll = update_shifts(data[:, parms.core_ind],
                                                  dq[:, parms.core_ind],
                                                  current_psf, ref_shifts, parms)
                 else:
                     ind = np.arange(data.shape[0])
 
-                print 'Shift step 2 done ssqe, total: ', ssqe.sum()
-                print 'Shift step 2 done ssqe, min: ', ssqe.min()
-                print 'Shift step 2 done ssqe, median: ', np.median(ssqe)
-                print 'Shift step 2 done ssqe, max: ', ssqe.max()
+                print 'Shift step 2 done nll, total: ', nll.sum()
+                print 'Shift step 2 done nll, min: ', nll.min()
+                print 'Shift step 2 done nll, median: ', np.median(nll)
+                print 'Shift step 2 done nll, max: ', nll.max()
 
                 if dumpfilebase is not None:
                     name = dumpfilebase + '_mask_%d.dat' % parms.iter
                     np.savetxt(name, mask, fmt='%d')
                     name = dumpfilebase + '_shifts_%d.dat' % parms.iter
                     np.savetxt(name, shifts)
-                    name = dumpfilebase + '_shift_ssqe_%d.dat' % parms.iter
-                    np.savetxt(name, ssqe)
+                    name = dumpfilebase + '_shift_nll_%d.dat' % parms.iter
+                    np.savetxt(name, nll)
 
             if kind == 'evaluate':
                 parms.return_parms = True
-                nll, parms = evaluate((data, dq, shifts, current_psf, parms,
-                                       False))
-                parms.retrun_parms = False
+                set_clip_parameters(clip_parms, parms, final_clip)
+                nll, fit_parms, masks = evaluate((data, dq, shifts, current_psf,
+                                                  parms, False))
+                parms.return_parms = False
 
             if kind == 'psf':
                 set_clip_parameters(clip_parms, parms, final_clip)
-                new_psf = update_psf(current_psf, data, dq, shifts,
-                                     validation_data, validation_dq, v_shifts,
-                                     parms)
+                new_psf = update_psf(current_psf, data, dq, shifts, nll, 
+                                     fit_parms, masks, parms)
 
                 if new_psf is not None:
                     current_psf = new_psf
@@ -127,6 +127,21 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
                         hdu.writeto(dumpfilebase + '_psf_%d.fits' % parms.iter,
                                     clobber=True)
 
+            if kind == 'plot_data':
+                if clip_parms is None:
+                    parms.clip_parms = [1, np.inf]
+                else:
+                    try:
+                        parms.clip_parms = clip_parms[parms.iter]
+                    except:
+                        parms.clip_parms = final_clip
+
+                parms.plot_data = True
+                nll = evaluate((data[:parms.Nplot], dq[:parms.Nplot],
+                                shifts[:parms.Nplot], current_psf, parms,
+                                False))
+                parms.plot_data = False
+
         parms.iter += 1
 
 class InferenceParms(object):
@@ -134,7 +149,7 @@ class InferenceParms(object):
     Class for storing and referencing parameters used in PSF inference.
     """
     def __init__(self, h, q, eps, tol, gain, plot, floor, Ndata, Nplot, small,
-                 Nsearch, id_start, max_ssqe, min_frac, Nthreads, core_size,
+                 Nsearch, id_start, max_nll, min_frac, Nthreads, core_size,
                  background, clip_parms, patch_shape,
                  search_rate, plotfilebase, search_scale, psf_model_shape,
                  shift_test_thresh):
@@ -148,8 +163,8 @@ class InferenceParms(object):
         self.Ndata = Ndata
         self.Nplot = Nplot
         self.small = small
+        self.max_nll = max_nll
         self.Nsearch = Nsearch
-        self.max_ssqe = max_ssqe
         self.min_frac = min_frac
         self.Nthreads = Nthreads
         self.core_size = core_size
