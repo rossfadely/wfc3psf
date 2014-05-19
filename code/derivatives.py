@@ -22,15 +22,18 @@ def get_derivatives(data, shifts, psf_model, old_nlls, fit_parms, masks, parms):
                        fit_parms[i], masks[i], parms)
 
     results = list(mapfn(one_datum_nll_diff, [args for args in argslist]))
-    
+
     Neff = 0
     nll_diff_sums = np.zeros_like(psf_model)
     for i in range(parms.Ndata):
-        nll_diff_sums += results[i][0]
+        nll_diff_sums += results[i]
         if np.any(results[i][0] != 0.0):
             Neff += 1
 
-    derivatives = nll_diff_sums / Neff / parms.h + reg_term
+    if Neff == 0:
+        derivatives = np.zeros_like(psf_model)
+    else:
+        derivatives = nll_diff_sums / Neff / parms.h + reg_term
 
     # tidy up
     pool.close()
@@ -100,11 +103,32 @@ def one_datum_nll_diff((datum, shift, psf_model, old_nll, fitparms, mask,
 
             model = fitparms[0] * psf + bkg
             new_nll = eval_nll(datum[mask], model[mask], parms)
-            if np.sum(new_nll)>=parms.max_nll: assert 0, 'whoa'
-            if np.sum(old_nll)>=parms.max_nll: assert 0, 'whoa old'
             nll_diff[i, j] = np.sum(new_nll - old_nll[mask])
 
     return nll_diff
+
+def old_derivative((datum, dq, shift, psf_model, old_ssqe, old_reg,
+                    parms)):
+    """
+    Calculate the derivative for a single datum using forward differencing.
+    """
+    counts = np.zeros_like(psf_model)
+    derivatives = np.zeros_like(psf_model)
+    for i in range(parms.psf_model_shape[0]):
+        for j in range(parms.psf_model_shape[1]):
+            temp_psf = psf_model.copy()
+            temp_psf[i, j] += parms.h
+
+            new_ssqe = evaluate((datum, dq, shift, temp_psf, parms, False))
+            #new_reg = local_regularization((temp_psf, parms.eps, (i, j)))
+
+            derivatives[i, j] = np.sum(new_ssqe - old_ssqe)
+            #derivatives[i, j] += new_reg - old_reg[i, j]
+
+    ind = np.where(derivatives != 0.0)
+    counts[ind] += 1.
+
+    return counts, derivatives
 
 def local_regularization((psf_model, eps, idx)):
     """

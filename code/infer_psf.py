@@ -1,3 +1,4 @@
+import time
 import multiprocessing
 import numpy as np
 import pyfits as pf
@@ -6,16 +7,18 @@ from grid_definitions import get_grids
 from shifts_update import update_shifts
 from patch_fitting import evaluate
 from psf_update import update_psf
+from plotting import psf_plot
 
-def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
+def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
+                background='linear',
                 sequence=['shifts', 'psf'], tol=1.e-4, eps=1.e-4,
                 ini_shifts=None, Nthreads=20, floor=None, plotfilebase=None,
                 gain=None, maxiter=np.Inf, dumpfilebase=None, trim_frac=0.005,
                 min_data_frac=0.75, core_size=5,
                 plot=False, clip_parms=None, final_clip=[1, 3.], q=1.0,
                 clip_shifts=False, h=1.4901161193847656e-08, Nplot=20,
-                small=1.e-6, Nsearch=64, search_rate=0.125, search_scale=1e-4,
-                shift_test_thresh=0.475, min_frac=0.5, max_nll=1.e10):
+                small=1.e-5, Nsearch=64, search_rate=0.125, search_scale=1e-4,
+                shift_test_thresh=0.475, min_frac=0.5, max_nll=1.e10, Nburn=10):
     """
     Patch fitting routines for BallPeenHammer.
     """
@@ -23,14 +26,14 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
     assert np.mod(patch_shape[0], 2) == 1, 'Patch shape[0] must be odd'
     assert np.mod(patch_shape[1], 2) == 1, 'Patch shape[1] must be odd'
     assert np.mod(core_size, 2) == 1, 'Core size must be odd'
-    assert (patch_shape[0] * patch_shape[1]) == data.shape[1], \
+    assert (patch_shape[0] * patch_shape[1]) == all_data.shape[1], \
         'Patch shape does not match data shape'
     kinds = ['shifts', 'psf', 'evaluate', 'plot_data']
     for i in range(len(sequence)):
         assert sequence[i] in kinds, 'sequence not allowed'
 
     # set parameters
-    parms = InferenceParms(h, q, eps, tol, gain, plot, floor, data.shape[0],
+    parms = InferenceParms(h, q, eps, tol, gain, plot, floor, all_data.shape[0],
                            Nplot, small, Nsearch, id_start, max_nll, min_frac,
                            Nthreads, core_size, background, None,
                            patch_shape, search_rate, plotfilebase,
@@ -39,21 +42,43 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
     # initialize
     current_psf = ini_psf.copy()
     current_psf /= current_psf.max()
-    current_loss = np.Inf
+    current_cost = np.inf
     if ini_shifts is not None:
         shifts = ini_shifts
         ref_shifts = ini_shifts.copy()
     else:
-        ref_shifts = np.zeros((data.shape[0], 2))
-
-    # minimum number of patches, mask initialization
-    Nmin = np.ceil(min_data_frac * data.shape[0]).astype(np.int)
-    mask = np.arange(data.shape[0], dtype=np.int)
+        ref_shifts = np.zeros((all_data.shape[0], 2))
+    if Nburn is not None:
+        current_cost = None
+        burn_iter = 0
+    else:
+        data = all_data
+        dq = all_dq
+        current_cost = np.inf
+        burn_iter = None
 
     # run
-    cost = np.Inf
-    tot_cost = np.Inf
+    t0 = time.time()
     while True:
+        t = time.time()
+        # assign data used during burnin
+        if burn_iter is not None:
+            if burn_iter == Nburn:
+                data = all_data
+                dq = all_dq
+                current_cost = np.inf
+            else:
+                burn_iter += 1
+                burn_size = np.ceil(1. * all_data.shape[0] / Nburn)
+                data = all_data[:burn_iter * burn_size]
+                dq = all_dq[:burn_iter * burn_size]
+
+        # minimum number of patches, mask initialization
+        Nmin = np.ceil(min_data_frac * data.shape[0]).astype(np.int)
+        mask = np.arange(data.shape[0], dtype=np.int)
+        parms.Ndata = data.shape[0]
+
+        # run a iteration
         for kind in sequence:
 
             if parms.iter >= maxiter:
@@ -62,11 +87,10 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
             if kind == 'shifts':
                 parms.clip_parms = None
                 shifts, nll = update_shifts(data[:, parms.core_ind],
-                                             dq[:, parms.core_ind],
-                                             current_psf, ref_shifts, parms)
-
-                if parms.iter == 0:
-                    ref_shifts = shifts.copy()
+                                            dq[:, parms.core_ind],
+                                            current_psf,
+                                            np.zeros((data.shape[0], 2)), parms)
+                ref_shifts = shifts.copy()
 
                 print 'Shift step 1 done nll, total: ', nll.sum()
                 print 'Shift step 1 done nll, min: ', nll.min()
@@ -86,7 +110,7 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
                     mask = mask[ind]
                     ref_shifts = ref_shifts[ind]
                     parms.Ndata = data.shape[0]
-                    parms.data_ids = parms.data_ids[ind]
+                    #parms.data_ids = parms.data_ids[ind]
 
                     # re-run shifts
                     shifts, nll = update_shifts(data[:, parms.core_ind],
@@ -117,10 +141,11 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
 
             if kind == 'psf':
                 set_clip_parameters(clip_parms, parms, final_clip)
-                new_psf = update_psf(current_psf, data, dq, shifts, nll, 
-                                     fit_parms, masks, parms)
+                new_psf, cost = update_psf(current_psf, data, dq, shifts, nll, 
+                                           fit_parms, masks, parms)
 
                 if new_psf is not None:
+                    psf_plot(ini_psf, current_psf, new_psf, parms)
                     current_psf = new_psf
                     if (dumpfilebase is not None):
                         hdu = pf.PrimaryHDU(current_psf)
@@ -143,6 +168,17 @@ def PatchFitter(data, dq, ini_psf, patch_shape, id_start, background='linear',
                 parms.plot_data = False
 
         parms.iter += 1
+        print '\n\nCurrent cost: 0.2e, new cost 0.2e' % (current_cost, cost)
+        print 'Iter %d took %0.2e sec, total %0.2e sec\n\n' % (parms.iter, 
+                                                               time.time() - t, 
+                                                               time.time() - t0)
+        if current_cost is not None:
+            assert cost < current_cost, 'Global cost did not decrease'
+            if (current_cost - cost) / cost < tol:
+                print 'Converged at cost %s' % cost
+                return current_psf
+            else:
+                current_cost = cost
 
 class InferenceParms(object):
     """

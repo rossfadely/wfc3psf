@@ -118,3 +118,42 @@ def plot_data(i, data, model, bkg, ssqe, old_ssqe, parms, cbscale=0.7):
         
     fig.savefig(parms.plotfilebase + '_data_%d.png' % parms.data_ids[i])
     pl.close(fig)
+
+def psf_plot(initial_psf, current_psf, new_psf, parms):
+    """
+    Plot the psf relative to the previous and initial iterations.
+    """
+    shrink = 0.7
+    ws, hs = 0.05, 0.05
+    mn, mx = -0.15, 0.15
+    f = pl.figure(figsize=(10, 10))
+    pl.subplots_adjust(wspace=ws, hspace=hs)
+
+    pl.subplot(221)
+    pl.imshow(initial_psf, interpolation='nearest', origin='lower',
+              norm=LogNorm(vmin=new_psf.min(), vmax=new_psf.max()))
+    pl.colorbar(shrink=shrink)
+    pl.title('Initial psf')
+
+    pl.subplot(222)
+    pl.imshow(new_psf, interpolation='nearest', origin='lower',
+              norm=LogNorm(vmin=new_psf.min(), vmax=new_psf.max()))
+    pl.colorbar(shrink=shrink)
+    pl.title('Inferred psf, iter %d' % parms.iter)
+
+    pl.subplot(223)
+    pl.imshow((new_psf - initial_psf) / new_psf,
+              interpolation='nearest',
+              origin='lower', vmin=mn, vmax=mx)
+    pl.colorbar(shrink=shrink)
+    pl.title('Fractional change from initial')
+
+    pl.subplot(224)
+    pl.imshow((new_psf - current_psf) / current_psf,
+              interpolation='nearest',
+              origin='lower', vmin=mn, vmax=mx)
+    pl.colorbar(shrink=shrink)
+    pl.title('Fractional change from previous')
+    print parms.plotfilebase + '_psfs_%d.png' % parms.iter
+    f.savefig(parms.plotfilebase + '_psfs_%d.png' % parms.iter)
+    pl.close(f)
