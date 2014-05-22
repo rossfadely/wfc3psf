@@ -60,9 +60,10 @@ def plot_data(i, data, model, bkg, ssqe, old_ssqe, parms, cbscale=0.7):
             m = model.reshape(parms.patch_shape)
             f = parms.flags.reshape(parms.patch_shape)
 
+        m = np.abs(m)
         if np.sum(m) == 0.:
             return
-            
+        
         logkwargs = kwargs.copy()
         logkwargs['norm'] = LogNorm(vmin=m.min(), vmax=m.max())
 
@@ -116,10 +117,11 @@ def plot_data(i, data, model, bkg, ssqe, old_ssqe, parms, cbscale=0.7):
         pl.colorbar(shrink=cbscale)
         pl.title('Negative Log-likelihood,\ntotal=%0.3f' % s.sum())
         
-    fig.savefig(parms.plotfilebase + '_data_%d.png' % parms.data_ids[i])
+    fig.savefig(parms.plotfilebase + '_%s_data_%d.png' % (parms.iter,
+                                                          parms.data_ids[i]))
     pl.close(fig)
 
-def psf_plot(initial_psf, current_psf, new_psf, parms):
+def psf_plot(initial_psf, current_psf, new_psf, lower, parms):
     """
     Plot the psf relative to the previous and initial iterations.
     """
@@ -129,31 +131,39 @@ def psf_plot(initial_psf, current_psf, new_psf, parms):
     f = pl.figure(figsize=(10, 10))
     pl.subplots_adjust(wspace=ws, hspace=hs)
 
-    pl.subplot(221)
+    ax = pl.subplot(221)
     pl.imshow(initial_psf, interpolation='nearest', origin='lower',
-              norm=LogNorm(vmin=new_psf.min(), vmax=new_psf.max()))
+              norm=LogNorm(vmin=lower, vmax=new_psf.max()))
     pl.colorbar(shrink=shrink)
     pl.title('Initial psf')
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
 
-    pl.subplot(222)
+    ax = pl.subplot(222)
     pl.imshow(new_psf, interpolation='nearest', origin='lower',
-              norm=LogNorm(vmin=new_psf.min(), vmax=new_psf.max()))
+              norm=LogNorm(vmin=lower, vmax=new_psf.max()))
     pl.colorbar(shrink=shrink)
     pl.title('Inferred psf, iter %d' % parms.iter)
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
 
-    pl.subplot(223)
+    ax = pl.subplot(223)
     pl.imshow((new_psf - initial_psf) / new_psf,
               interpolation='nearest',
               origin='lower', vmin=mn, vmax=mx)
     pl.colorbar(shrink=shrink)
     pl.title('Fractional change from initial')
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
 
-    pl.subplot(224)
+    ax = pl.subplot(224)
     pl.imshow((new_psf - current_psf) / current_psf,
               interpolation='nearest',
               origin='lower', vmin=mn, vmax=mx)
     pl.colorbar(shrink=shrink)
     pl.title('Fractional change from previous')
-    print parms.plotfilebase + '_psfs_%d.png' % parms.iter
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
+
     f.savefig(parms.plotfilebase + '_psfs_%d.png' % parms.iter)
     pl.close(f)

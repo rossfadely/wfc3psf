@@ -14,7 +14,7 @@ def update_psf(psf_model, data, dq, shifts, old_nll, fit_parms, masks,
     finding the appropriate step in those directions.
     """
     # heavy lifting, get derivatives
-    derivatives, old_reg = get_derivatives(data, shifts, psf_model, old_nll,
+    derivatives, old_reg = get_derivatives(data, dq, shifts, psf_model, old_nll,
                                            fit_parms, masks, parms)
 
     # check that small step improves the model
@@ -76,7 +76,6 @@ def update_psf(psf_model, data, dq, shifts, old_nll, fit_parms, masks,
     # update
     psf_model = psf_model - derivatives * best_scale
     psf_model = np.maximum(parms.small, psf_model)
-    psf_model /= psf_model.max()
 
     if parms.plot:
         searchplot(nlls, regs, scales, parms)

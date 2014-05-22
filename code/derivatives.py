@@ -4,7 +4,8 @@ import numpy as np
 from patch_fitting import eval_nll, make_background, evaluate
 from generation import render_psfs
 
-def get_derivatives(data, shifts, psf_model, old_nlls, fit_parms, masks, parms):
+def get_derivatives(data, dq, shifts, psf_model, old_nlls, fit_parms, masks,
+                    parms):
     """
     Calculate the derivatives of the objective (in patch_fitting)
     with respect to the psf model.
@@ -107,29 +108,6 @@ def one_datum_nll_diff((datum, shift, psf_model, old_nll, fitparms, mask,
 
     return nll_diff
 
-def old_derivative((datum, dq, shift, psf_model, old_ssqe, old_reg,
-                    parms)):
-    """
-    Calculate the derivative for a single datum using forward differencing.
-    """
-    counts = np.zeros_like(psf_model)
-    derivatives = np.zeros_like(psf_model)
-    for i in range(parms.psf_model_shape[0]):
-        for j in range(parms.psf_model_shape[1]):
-            temp_psf = psf_model.copy()
-            temp_psf[i, j] += parms.h
-
-            new_ssqe = evaluate((datum, dq, shift, temp_psf, parms, False))
-            #new_reg = local_regularization((temp_psf, parms.eps, (i, j)))
-
-            derivatives[i, j] = np.sum(new_ssqe - old_ssqe)
-            #derivatives[i, j] += new_reg - old_reg[i, j]
-
-    ind = np.where(derivatives != 0.0)
-    counts[ind] += 1.
-
-    return counts, derivatives
-
 def local_regularization((psf_model, eps, idx)):
     """
     Calculate the local regularization for each pixel.
@@ -165,15 +143,18 @@ def local_regularization((psf_model, eps, idx)):
 
     else:
         idx = np.array(idx)
-        ind0 = idx[:, None] + pm[None, :]
-        ind0[ind0 == -1] = 0
-        ind0[ind0 == psf_shape[0]] = psf_shape[0] - 1
-        ind1 = idx[:, None] + pm[None, :]
-        ind1[ind1 == -1] = 0
-        ind1[ind1 == psf_shape[1]] = psf_shape[1] - 1
-
         value = psf_model[idx[0], idx[1]]
-        reg = eps * np.sum((psf_model[ind0[0], idx[1]] - value) ** 2.)
-        reg += eps * np.sum((psf_model[idx[0], ind1[1]] - value) ** 2.)
+
+        # axis 0
+        ind = idx[:, None] + pm[None, :]
+        ind[ind == -1] = 0 # lower edge case
+        ind[ind == psf_shape[0]] = psf_shape[0] - 1 # upper edge case
+        reg = eps * np.sum((psf_model[ind[0], idx[1]] - value) ** 2.)
+
+        # axis 1
+        ind = idx[:, None] + pm[None, :]
+        ind[ind == -1] = 0 # lower edge case
+        ind[ind == psf_shape[1]] = psf_shape[1] - 1 # upper edge case
+        reg += eps * np.sum((psf_model[idx[0], ind[1]] - value) ** 2.)
 
     return reg

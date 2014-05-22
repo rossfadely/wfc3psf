@@ -14,13 +14,13 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
                 sequence=['shifts', 'psf'], tol=1.e-4, eps=1.e-4,
                 ini_shifts=None, Nthreads=20, floor=None, plotfilebase=None,
                 gain=None, maxiter=np.Inf, dumpfilebase=None, trim_frac=0.005,
-                min_data_frac=0.75, core_size=5,
+                min_data_frac=0.75, core_size=5, reset_iter=5, lower=1.e-5,
                 plot=False, clip_parms=None, final_clip=[1, 3.], q=1.0,
                 clip_shifts=False, h=1.4901161193847656e-08, Nplot=20,
-                small=1.e-5, Nsearch=64, search_rate=0.125, search_scale=1e-4,
+                small=1.e-8, Nsearch=64, search_rate=0.125, search_scale=4e-8,
                 shift_test_thresh=0.475, min_frac=0.5, max_nll=1.e10, Nburn=10):
     """
-    Patch fitting routines for BallPeenHammer.
+    Patch fitting routines for psf inference.
     """
     assert background in ['constant', 'linear']
     assert np.mod(patch_shape[0], 2) == 1, 'Patch shape[0] must be odd'
@@ -63,12 +63,12 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
         t = time.time()
         # assign data used during burnin
         if burn_iter is not None:
+            burn_iter += 1
             if burn_iter == Nburn:
                 data = all_data
                 dq = all_dq
                 current_cost = np.inf
             else:
-                burn_iter += 1
                 burn_size = np.ceil(1. * all_data.shape[0] / Nburn)
                 data = all_data[:burn_iter * burn_size]
                 dq = all_dq[:burn_iter * burn_size]
@@ -110,7 +110,7 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
                     mask = mask[ind]
                     ref_shifts = ref_shifts[ind]
                     parms.Ndata = data.shape[0]
-                    #parms.data_ids = parms.data_ids[ind]
+                    parms.data_ids = parms.data_ids[ind]
 
                     # re-run shifts
                     shifts, nll = update_shifts(data[:, parms.core_ind],
@@ -145,12 +145,17 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
                                            fit_parms, masks, parms)
 
                 if new_psf is not None:
-                    psf_plot(ini_psf, current_psf, new_psf, parms)
+                    psf_plot(ini_psf, current_psf, new_psf, lower, parms)
                     current_psf = new_psf
                     if (dumpfilebase is not None):
-                        hdu = pf.PrimaryHDU(current_psf)
+                        hdu = pf.PrimaryHDU(current_psf / current_psf.max())
                         hdu.writeto(dumpfilebase + '_psf_%d.fits' % parms.iter,
                                     clobber=True)
+
+                if (np.mod(parms.iter, reset_iter) == 0) & (parms.iter > 0):
+                    current_psf = np.maximum(lower, current_psf)
+                    current_psf /= current_psf.max()
+                    current_cost = np.inf
 
             if kind == 'plot_data':
                 if clip_parms is None:
@@ -162,23 +167,29 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
                         parms.clip_parms = final_clip
 
                 parms.plot_data = True
-                nll = evaluate((data[:parms.Nplot], dq[:parms.Nplot],
+                foo = evaluate((data[:parms.Nplot], dq[:parms.Nplot],
                                 shifts[:parms.Nplot], current_psf, parms,
                                 False))
                 parms.plot_data = False
 
-        parms.iter += 1
-        print '\n\nCurrent cost: 0.2e, new cost 0.2e' % (current_cost, cost)
-        print 'Iter %d took %0.2e sec, total %0.2e sec\n\n' % (parms.iter, 
-                                                               time.time() - t, 
-                                                               time.time() - t0)
+        if current_cost is None:
+            tup = (-99., cost)
+        else:
+            tup = (current_cost, cost)
+        print '\n\nUsing %d patches' % data.shape[0]
+        print 'Current cost: %0.2e, new cost %0.2e' % tup
+        dt = (time.time() - t) / 3600.
+        dt0 = (time.time() - t0) / 3600.
+        print 'Iter %d took %0.2e hrs, total %0.2e hrs\n\n' % (parms.iter, dt, 
+                                                               dt0)
         if current_cost is not None:
             assert cost < current_cost, 'Global cost did not decrease'
-            if (current_cost - cost) / cost < tol:
+            if np.abs((current_cost - cost) / cost) < tol:
                 print 'Converged at cost %s' % cost
                 return current_psf
             else:
                 current_cost = cost
+        parms.iter += 1
 
 class InferenceParms(object):
     """

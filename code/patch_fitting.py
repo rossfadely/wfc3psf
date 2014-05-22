@@ -31,7 +31,7 @@ def evaluate((data, dq, shifts, psf_model, parms, core)):
         model = fitparms[0] * psfs[i] + bkg
 
         # chi-squared like term
-        if model[ind].size >= min_pixels:
+        if (model[ind].size >= min_pixels):
             nll[i, ind] = eval_nll(data[i][ind], model[ind], parms)
         else:
             nll[i] = parms.max_nll
