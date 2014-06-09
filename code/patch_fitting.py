@@ -27,8 +27,9 @@ def evaluate((data, dq, shifts, psf_model, parms, core)):
     nll = np.zeros_like(data)
     for i in range(data.shape[0]):
         fitparms, bkg, ind = fit_single_patch((data[i], psfs[i],
-                                                      dq[i], parms))
+                                               dq[i], parms))
         model = fitparms[0] * psfs[i] + bkg
+        scaled = fitparms[0] * psfs[i]
 
         # chi-squared like term
         if (model[ind].size >= min_pixels):

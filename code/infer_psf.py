@@ -11,18 +11,18 @@ from plotting import psf_plot
 
 def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
                 background='linear',
-                sequence=['shifts', 'psf'], tol=1.e-4, eps=1.e-4,
+                sequence=['shifts', 'psf'], tol=1.e-10, eps=1.e-4, gamma=1.e0,
                 ini_shifts=None, Nthreads=20, floor=None, plotfilebase=None,
                 gain=None, maxiter=np.Inf, dumpfilebase=None, trim_frac=0.005,
-                min_data_frac=0.75, core_size=5, reset_iter=5, lower=1.e-5,
+                min_data_frac=0.75, core_size=5, lower=1.e-5,
                 plot=False, clip_parms=None, final_clip=[1, 3.], q=1.0,
                 clip_shifts=False, h=1.4901161193847656e-08, Nplot=20,
-                small=1.e-8, Nsearch=64, search_rate=0.125, search_scale=4e-8,
+                small=1.e-5, Nsearch=128, search_rate=0.1, search_scale=1e-8,
                 shift_test_thresh=0.475, min_frac=0.5, max_nll=1.e10, Nburn=10):
     """
     Patch fitting routines for psf inference.
     """
-    assert background in ['constant', 'linear']
+    assert background in [None, 'constant', 'linear']
     assert np.mod(patch_shape[0], 2) == 1, 'Patch shape[0] must be odd'
     assert np.mod(patch_shape[1], 2) == 1, 'Patch shape[1] must be odd'
     assert np.mod(core_size, 2) == 1, 'Core size must be odd'
@@ -33,7 +33,7 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
         assert sequence[i] in kinds, 'sequence not allowed'
 
     # set parameters
-    parms = InferenceParms(h, q, eps, tol, gain, plot, floor, all_data.shape[0],
+    parms = InferenceParms(h, q, eps, tol, gain, plot, floor, gamma, all_data.shape[0],
                            Nplot, small, Nsearch, id_start, max_nll, min_frac,
                            Nthreads, core_size, background, None,
                            patch_shape, search_rate, plotfilebase,
@@ -145,17 +145,12 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
                                            fit_parms, masks, parms)
 
                 if new_psf is not None:
-                    psf_plot(ini_psf, current_psf, new_psf, lower, parms)
+                    psf_plot(ini_psf, np.abs(current_psf / current_psf.max()), np.abs(new_psf / new_psf.max()), np.min(np.abs(new_psf / new_psf.max())), parms)
                     current_psf = new_psf
                     if (dumpfilebase is not None):
                         hdu = pf.PrimaryHDU(current_psf / current_psf.max())
                         hdu.writeto(dumpfilebase + '_psf_%d.fits' % parms.iter,
                                     clobber=True)
-
-                if (np.mod(parms.iter, reset_iter) == 0) & (parms.iter > 0):
-                    current_psf = np.maximum(lower, current_psf)
-                    current_psf /= current_psf.max()
-                    current_cost = np.inf
 
             if kind == 'plot_data':
                 if clip_parms is None:
@@ -183,7 +178,7 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
         print 'Iter %d took %0.2e hrs, total %0.2e hrs\n\n' % (parms.iter, dt, 
                                                                dt0)
         if current_cost is not None:
-            assert cost < current_cost, 'Global cost did not decrease'
+            #assert cost < current_cost, 'Global cost did not decrease'
             if np.abs((current_cost - cost) / cost) < tol:
                 print 'Converged at cost %s' % cost
                 return current_psf
@@ -195,7 +190,7 @@ class InferenceParms(object):
     """
     Class for storing and referencing parameters used in PSF inference.
     """
-    def __init__(self, h, q, eps, tol, gain, plot, floor, Ndata, Nplot, small,
+    def __init__(self, h, q, eps, tol, gain, plot, floor, gamma, Ndata, Nplot, small,
                  Nsearch, id_start, max_nll, min_frac, Nthreads, core_size,
                  background, clip_parms, patch_shape,
                  search_rate, plotfilebase, search_scale, psf_model_shape,
@@ -207,6 +202,7 @@ class InferenceParms(object):
         self.gain = gain
         self.plot = plot
         self.floor = floor
+        self.gamma = gamma
         self.Ndata = Ndata
         self.Nplot = Nplot
         self.small = small

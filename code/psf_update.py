@@ -21,63 +21,77 @@ def update_psf(psf_model, data, dq, shifts, old_nll, fit_parms, masks,
     temp_psf = psf_model.copy() - derivatives * parms.h
     nll = evaluate((data, dq, shifts, temp_psf, parms, False))
     nll = np.mean(nll[nll < parms.max_nll])
-    reg = np.sum(local_regularization((temp_psf, parms.eps, None)))
+    reg = local_regularization((temp_psf, parms, None))
+    reg = np.sum(reg)
     old_nll = np.mean(old_nll[old_nll < parms.max_nll])
     old_reg = np.sum(old_reg)
     old_cost = old_nll + old_reg
+    print old_nll, old_reg, old_cost
+    print nll, reg, nll + reg
     assert (nll + reg - old_cost) < 0.0, 'psf update error'
 
     # find update to the psf
+    Nbad = 0
+    nlls = []
+    regs = []
+    costs = []
+    scales = []
+    search = False
     current_scale = parms.search_scale
-    regs = np.zeros(parms.Nsearch)
-    nlls = np.zeros(parms.Nsearch)
-    costs = np.zeros(parms.Nsearch)
-    scales = np.zeros(parms.Nsearch)
     best_cost = np.inf
-    for i in range(parms.Nsearch):
+    while True:
         # perturb
         temp_psf = psf_model.copy() - derivatives * current_scale
-        temp_psf = np.maximum(parms.small, temp_psf)
+        #temp_psf = np.maximum(parms.small, temp_psf)
 
         # evaluate
         nll = evaluate((data, dq, shifts, temp_psf, parms, False))
         nll = np.mean(nll[nll < parms.max_nll])
-        reg = np.sum(local_regularization((temp_psf, parms.eps, None)))
+        reg = local_regularization((temp_psf, parms, None))
+        reg = np.sum(reg)
+        cost = reg + nll
+
+        #if np.any(temp_psf < 0.0):
+        #    cost = parms.max_nll
 
         # store
-        regs[i] = reg
-        nlls[i] = nll
-        costs[i] = reg + nll
-        scales[i] = current_scale
+        regs.append(reg)
+        nlls.append(nll)
+        costs.append(cost)
+        scales.append(current_scale)
 
         # update best
-        if costs[i] < best_cost:
-            msg = 'Search step %d: nll: %0.4e, reg: %0.4e, cost: %0.4e, ' + \
+        if cost < best_cost:
+            msg = 'Search step: nll: %0.4e, reg: %0.4e, cost: %0.4e, ' + \
                 'scale: %0.4e'
-            print msg % (i, nlls[i], regs[i], costs[i], current_scale)
-            best_reg = regs[i]
-            best_nll = nlls[i]
-            best_cost = costs[i]
-            best_scale = scales[i]
+            print msg % (nll, reg, cost, current_scale)
+            best_reg = reg
+            best_nll = nll
+            best_cost = cost
+            best_scale = current_scale
+            search = True
+            if current_scale < parms.h:
+                break
+        elif search:
+            Nbad += 1
+            if Nbad == parms.Nsearch:
+                break
 
         # go down in scale
         current_scale = np.exp(np.log(current_scale) - parms.search_rate)
-
-    # fill in broken searches
-    ind = nlls == np.inf
-    idx = nlls != np.inf
-    nlls[ind] = np.max(nlls[idx])
 
     print 'Old nll: %0.4e, reg: %0.4e, total: %0.4e' % \
         (old_nll, old_reg, old_cost)
     print 'New nll: %0.4e, reg: %0.4e, total: %0.4e, at scale %0.3e' % \
         (best_nll, best_reg, best_cost, best_scale)
-    
+    assert best_cost < old_cost, 'Update search failed.'
+
     # update
     psf_model = psf_model - derivatives * best_scale
     psf_model = np.maximum(parms.small, psf_model)
+    psf_model /= psf_model.max()
 
     if parms.plot:
-        searchplot(nlls, regs, scales, parms)
+        searchplot(np.array(nlls), np.array(regs), np.array(scales), parms)
 
     return psf_model, best_cost

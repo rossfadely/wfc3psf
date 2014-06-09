@@ -48,7 +48,7 @@ def regularization_derivative(psf_model, parms):
     Compute derivative of regularization wrt the psf.
     """
     # old regularization
-    old_reg = local_regularization((psf_model, parms.eps, None))
+    old_reg = local_regularization((psf_model, parms, None))
 
     # Map to the processes
     pool = multiprocessing.Pool(parms.Nthreads)
@@ -61,16 +61,17 @@ def regularization_derivative(psf_model, parms):
             idx = i * parms.psf_model_shape[1] + j
             tmp_psf = psf_model.copy()
             tmp_psf[i, j] += parms.h
-            argslist[idx] = (tmp_psf, parms.eps, (i, j))
+            argslist[idx] = (tmp_psf, parms, (i, j))
     new_reg = np.array((mapfn(local_regularization,
                               [args for args in argslist])))
+    new_reg = new_reg.reshape(parms.psf_model_shape)
 
     # tidy up
     pool.close()
     pool.terminate()
     pool.join()
-
-    return (new_reg.reshape(parms.psf_model_shape) - old_reg) / parms.h, old_reg
+    
+    return (new_reg - old_reg) / parms.h, old_reg
 
 def one_datum_nll_diff((datum, shift, psf_model, old_nll, fitparms, mask,
                         parms)):
@@ -84,11 +85,13 @@ def one_datum_nll_diff((datum, shift, psf_model, old_nll, fitparms, mask,
 
     # background model
     if parms.background == 'linear':
-        N = np.sqrt(psf.size).astype(np.int)
+        N = np.sqrt(psf_model.size).astype(np.int)
         x, y = np.meshgrid(range(N), range(N))
-        A = np.vstack((psf, np.ones_like(psf),
+        A = np.vstack((np.ones_like(psf), np.ones_like(psf),
                        x.ravel(), y.ravel())).T
         bkg = make_background(datum, A, fitparms, parms.background)
+    elif parms.background == None:
+        bkg = 0.0
     else:
         bkg = fitparms[-1]
 
@@ -108,10 +111,12 @@ def one_datum_nll_diff((datum, shift, psf_model, old_nll, fitparms, mask,
 
     return nll_diff
 
-def local_regularization((psf_model, eps, idx)):
+def local_regularization((psf_model, parms, idx)):
     """
     Calculate the local regularization for each pixel.
     """
+    eps = parms.eps
+    gamma = parms.gamma
     if (eps is None):
         if idx is None:
             return np.zeros_like(psf_model)
@@ -130,7 +135,8 @@ def local_regularization((psf_model, eps, idx)):
         ind[ind == psf_shape[0]] = psf_shape[0] - 1 # boundary foo
         for i in range(psf_shape[1]):
             diff = psf_model[ind, i] - psf_model[idx, i][:, None]
-            reg[:, i] += eps * np.sum(diff ** 2., axis=1)
+            values = psf_model[idx, i][:, None]
+            reg[:, i] += eps * np.sum((diff / values) ** 2., axis=1)
 
         # axis 1
         idx = np.arange(psf_shape[1])
@@ -139,7 +145,14 @@ def local_regularization((psf_model, eps, idx)):
         ind[ind == psf_shape[1]] = psf_shape[1] - 1 # boundary foo
         for i in range(psf_shape[0]):
             diff = psf_model[i, ind] - psf_model[i, idx][:, None]
-            reg[i, :] += eps * np.sum(diff ** 2., axis=1)
+            values = psf_model[i, idx][:, None]
+            reg[i, :] += eps * np.sum((diff / values) ** 2., axis=1)
+    
+        # l2 norm
+        reg += gamma * psf_model ** 2.
+
+        # floor
+        #reg += 1.e-1 / (1. + np.exp((psf_model - 4e-5) * 2.e5))
 
     else:
         idx = np.array(idx)
@@ -149,12 +162,20 @@ def local_regularization((psf_model, eps, idx)):
         ind = idx[:, None] + pm[None, :]
         ind[ind == -1] = 0 # lower edge case
         ind[ind == psf_shape[0]] = psf_shape[0] - 1 # upper edge case
-        reg = eps * np.sum((psf_model[ind[0], idx[1]] - value) ** 2.)
+        diff = psf_model[ind[0], idx[1]] - value
+        reg = eps * np.sum((diff / value) ** 2.)
 
         # axis 1
         ind = idx[:, None] + pm[None, :]
         ind[ind == -1] = 0 # lower edge case
         ind[ind == psf_shape[1]] = psf_shape[1] - 1 # upper edge case
-        reg += eps * np.sum((psf_model[idx[0], ind[1]] - value) ** 2.)
+        diff = psf_model[idx[0], ind[1]] - value
+        reg += eps * np.sum((diff / value) ** 2.)
+
+        # l2 norm
+        reg += gamma * value ** 2.
+
+        # floor
+        #reg += 1.e-1 / (1. + np.exp((value - 4e-5) * 2.e5) )
 
     return reg
