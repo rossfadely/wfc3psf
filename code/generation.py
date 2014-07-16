@@ -3,7 +3,7 @@ import numpy as np
 from scipy.special import erf
 from scipy.interpolate import RectBivariateSpline
 
-def render_psfs(psf_model, shifts, patch_shape, psf_grid, k=3):
+def render_psfs(psf_model, shifts, patch_shape, psf_grid, k):
     """
     Make psfs under current model.
     """

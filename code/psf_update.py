@@ -3,22 +3,31 @@ import numpy as np
 
 from grid_definitions import get_grids
 from patch_fitting import eval_nll, evaluate, fit_single_patch
-from derivatives import get_derivatives, local_regularization
+from derivatives import get_derivatives, local_regularization, reg
 from generation import render_psfs
 from plotting import searchplot
 
+from scipy.optimize import fmin_powell
+from patch_fitting import evaluate
+
 def update_psf(psf_model, data, dq, shifts, old_nll, fit_parms, masks,
                parms):
+    p0 = psf_model.copy().ravel()
+    res = fmin_powell(cost, p0, full_output=True, disp=False,
+               args=(data, dq, shifts, parms), maxiter=1)
+    print res
+    assert 0
     """
     Update the psf model by calculating numerical derivatives and 
     finding the appropriate step in those directions.
+    """
     """
     # heavy lifting, get derivatives
     derivatives, old_reg = get_derivatives(data, dq, shifts, psf_model, old_nll,
                                            fit_parms, masks, parms)
 
     # check that small step improves the model
-    temp_psf = psf_model.copy() - derivatives * parms.h
+    temp_psf = psf_model.copy() - derivatives * np.min(parms.h * psf_model)
     nll = evaluate((data, dq, shifts, temp_psf, parms, False))
     nll = np.mean(nll[nll < parms.max_nll])
     reg = local_regularization((temp_psf, parms, None))
@@ -28,6 +37,7 @@ def update_psf(psf_model, data, dq, shifts, old_nll, fit_parms, masks,
     old_cost = old_nll + old_reg
     print old_nll, old_reg, old_cost
     print nll, reg, nll + reg
+    #assert reg < old_reg
     assert (nll + reg - old_cost) < 0.0, 'psf update error'
 
     # find update to the psf
@@ -51,9 +61,6 @@ def update_psf(psf_model, data, dq, shifts, old_nll, fit_parms, masks,
         reg = np.sum(reg)
         cost = reg + nll
 
-        #if np.any(temp_psf < 0.0):
-        #    cost = parms.max_nll
-
         # store
         regs.append(reg)
         nlls.append(nll)
@@ -70,7 +77,7 @@ def update_psf(psf_model, data, dq, shifts, old_nll, fit_parms, masks,
             best_cost = cost
             best_scale = current_scale
             search = True
-            if current_scale < parms.h:
+            if current_scale < np.min(parms.h * psf_model):
                 break
         elif search:
             Nbad += 1
@@ -88,10 +95,22 @@ def update_psf(psf_model, data, dq, shifts, old_nll, fit_parms, masks,
 
     # update
     psf_model = psf_model - derivatives * best_scale
-    psf_model = np.maximum(parms.small, psf_model)
-    psf_model /= psf_model.max()
+    #psf_model = np.maximum(parms.small, psf_model)
+    #psf_model /= psf_model.max()
 
     if parms.plot:
         searchplot(np.array(nlls), np.array(regs), np.array(scales), parms)
+    """
 
     return psf_model, best_cost
+
+def cost(p, data, dq, shifts, parms):
+    """
+    Return cost under current PSF model.
+    """
+    psf_model = p.reshape(parms.psf_model_shape)
+    nll = evaluate((data, dq, shifts, psf_model, parms, False))
+    regularization, d = reg(psf_model, parms)
+    cost = np.mean(nll[nll < parms.max_nll]) + np.sum(regularization)
+    print cost
+    return cost

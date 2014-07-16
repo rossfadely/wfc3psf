@@ -15,7 +15,7 @@ def evaluate((data, dq, shifts, psf_model, parms, core)):
         patch_shape = parms.patch_shape
     min_pixels = np.ceil(parms.min_frac * patch_shape[0] * patch_shape[1])
 
-    psfs = render_psfs(psf_model, shifts, patch_shape, parms.psf_grid)
+    psfs = render_psfs(psf_model, shifts, patch_shape, parms.psf_grid, parms.k)
 
     if parms.return_parms:
         if parms.background == 'constant':            
@@ -149,3 +149,81 @@ def eval_nll(data, model, parms):
     var = parms.floor + parms.gain * np.abs(model)
     nll = 0.5 * (np.log(var) + (data - model) ** 2. / var)
     return nll
+
+def fit_single_patch_withvar((data, psf, dq, parms, var)):
+    """
+    Fit a single patch, return the scale for the psf plus any
+    background parameters.  Takes in flattened arrays for
+    data and psf.
+    """
+    gain = parms.gain
+    floor = parms.floor
+    clip_parms = parms.clip_parms
+    background = parms.background
+
+    if background is None:
+        A = np.atleast_2d(psf).T
+    elif background == 'constant':
+        A = np.vstack((psf, np.ones_like(psf))).T
+    elif background == 'linear':
+        N = np.sqrt(psf.size).astype(np.int)
+        x, y = np.meshgrid(range(N), range(N))
+        A = np.vstack((psf, np.ones_like(psf),
+                       x.ravel(), y.ravel())).T
+    else:
+        assert False, 'Background model not supported: %s' % background
+
+    ind = dq == 0
+
+    # fit the data using least squares
+    rh = np.dot(A[ind, :].T, data[ind] / var[ind])
+    #try:
+    lh = np.linalg.inv(np.dot(A[ind, :].T, A[ind, :] / var[ind, None]))
+    fit_parms = np.dot(lh, rh)
+    #except:
+    #    fit_parms = np.zeros(A.shape[1])
+
+    bkg = make_background(data, A, fit_parms, background)
+
+    # sigma clip if desired
+    if (clip_parms is not None) & (np.any(fit_parms != 0)):
+        Niter = clip_parms[0]
+        assert Niter == 1, 'Multiple rounds of clipping not supported.'
+        tol = clip_parms[1]
+        for i in range(Niter):
+
+            # define model and noise
+            scaled_psf = psf * fit_parms[0]
+            model = scaled_psf + bkg
+            if parms.plot_data:
+                parms.old_bkg = bkg
+                parms.old_model = model
+            model = model[ind]
+            scaled_psf = scaled_psf[ind]
+            var = floor + gain * np.abs(model) + (parms.q * scaled_psf) ** 2.
+
+            # sigma clip
+            chi = np.zeros_like(data)
+            chi[ind] = np.abs(data[ind] - model) / np.sqrt(var)
+            condition = chi - tol
+            condition = (condition > 0).reshape(parms.patch_shape)
+            
+            # redefine mask, grow and add to dq mask.
+            ind = 1 - ind.reshape(parms.patch_shape)
+            idx = grow_mask(condition)
+            if parms.plot_data:
+                parms.flags = ind.copy()
+                parms.flags[idx] = 3
+                parms.flags[condition] = 2
+            ind = np.ravel((ind == 0) & (idx == 0))
+
+            # refit
+            rh = np.dot(A[ind, :].T, data[ind])
+            try:
+                lh = np.linalg.inv(np.dot(A[ind, :].T, A[ind, :]))
+                fit_parms = np.dot(lh, rh)
+            except:
+                fit_parms = np.zeros(A.shape[1])
+            bkg = make_background(data, A, fit_parms, background)
+
+    return fit_parms, bkg, ind

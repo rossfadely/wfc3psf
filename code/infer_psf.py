@@ -6,6 +6,7 @@ import pyfits as pf
 from grid_definitions import get_grids
 from shifts_update import update_shifts
 from patch_fitting import evaluate
+from psf_update_linear import update_psf_linear
 from psf_update import update_psf
 from plotting import psf_plot
 
@@ -14,10 +15,10 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
                 sequence=['shifts', 'psf'], tol=1.e-10, eps=1.e-4, gamma=1.e0,
                 ini_shifts=None, Nthreads=20, floor=None, plotfilebase=None,
                 gain=None, maxiter=np.Inf, dumpfilebase=None, trim_frac=0.005,
-                min_data_frac=0.75, core_size=5, lower=1.e-5,
+                min_data_frac=0.75, core_size=5, lower=1.e-5, k=1,
                 plot=False, clip_parms=None, final_clip=[1, 3.], q=1.0,
                 clip_shifts=False, h=1.4901161193847656e-08, Nplot=20,
-                small=1.e-5, Nsearch=128, search_rate=0.1, search_scale=1e-8,
+                small=1.e-5, Nsearch=256, search_rate=0.05, search_scale=1e-2,
                 shift_test_thresh=0.475, min_frac=0.5, max_nll=1.e10, Nburn=10):
     """
     Patch fitting routines for psf inference.
@@ -33,11 +34,12 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
         assert sequence[i] in kinds, 'sequence not allowed'
 
     # set parameters
-    parms = InferenceParms(h, q, eps, tol, gain, plot, floor, gamma, all_data.shape[0],
+    parms = InferenceParms(h, k, q, eps, tol, gain, plot, floor, gamma, all_data.shape[0],
                            Nplot, small, Nsearch, id_start, max_nll, min_frac,
                            Nthreads, core_size, background, None,
                            patch_shape, search_rate, plotfilebase,
-                           search_scale, ini_psf.shape, shift_test_thresh)
+                           search_scale, ini_psf.shape, shift_test_thresh,
+                           ini_psf)
 
     # initialize
     current_psf = ini_psf.copy()
@@ -141,11 +143,18 @@ def PatchFitter(all_data, all_dq, ini_psf, patch_shape, id_start,
 
             if kind == 'psf':
                 set_clip_parameters(clip_parms, parms, final_clip)
-                new_psf, cost = update_psf(current_psf, data, dq, shifts, nll, 
-                                           fit_parms, masks, parms)
+                if parms.k == 1:
+                    new_psf, cost = update_psf_linear(current_psf, data, dq,
+                                                      shifts, nll, fit_parms,
+                                                      masks, parms)
+                else:
+                    new_psf, cost = update_psf(current_psf, data, dq, shifts,
+                                               nll, fit_parms, masks, parms)
 
                 if new_psf is not None:
-                    psf_plot(ini_psf, np.abs(current_psf / current_psf.max()), np.abs(new_psf / new_psf.max()), np.min(np.abs(new_psf / new_psf.max())), parms)
+                    psf_plot(ini_psf, np.maximum(parms.small, current_psf),
+                             np.maximum(parms.small, new_psf), parms.small,
+                             parms)
                     current_psf = new_psf
                     if (dumpfilebase is not None):
                         hdu = pf.PrimaryHDU(current_psf / current_psf.max())
@@ -190,12 +199,13 @@ class InferenceParms(object):
     """
     Class for storing and referencing parameters used in PSF inference.
     """
-    def __init__(self, h, q, eps, tol, gain, plot, floor, gamma, Ndata, Nplot, small,
+    def __init__(self, h, k, q, eps, tol, gain, plot, floor, gamma, Ndata, Nplot, small,
                  Nsearch, id_start, max_nll, min_frac, Nthreads, core_size,
                  background, clip_parms, patch_shape,
                  search_rate, plotfilebase, search_scale, psf_model_shape,
-                 shift_test_thresh):
+                 shift_test_thresh, ini_psf):
         self.h = h
+        self.k = k
         self.q = q
         self.eps = eps
         self.tol = tol
@@ -206,6 +216,7 @@ class InferenceParms(object):
         self.Ndata = Ndata
         self.Nplot = Nplot
         self.small = small
+        self.ini_psf = ini_psf
         self.max_nll = max_nll
         self.Nsearch = Nsearch
         self.min_frac = min_frac
@@ -226,6 +237,13 @@ class InferenceParms(object):
         self.data_ids = np.arange(id_start, Ndata + id_start, dtype=np.int)
 
         self.set_grids(core_size, patch_shape, psf_model_shape)
+
+        xsamp = (psf_model_shape[0] - 1) / patch_shape[0]
+        ysamp = (psf_model_shape[1] - 1) / patch_shape[1]
+        self.subsample = np.array([xsamp, ysamp])
+        xstep = self.psf_grid[0][1] - self.psf_grid[0][0]
+        ystep = self.psf_grid[1][1] - self.psf_grid[1][0]
+        self.psf_steps = np.array([xstep, ystep])
 
     def set_grids(self, core_size, patch_shape, psf_model_shape):
         """

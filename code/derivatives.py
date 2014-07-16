@@ -11,30 +11,32 @@ def get_derivatives(data, dq, shifts, psf_model, old_nlls, fit_parms, masks,
     with respect to the psf model.
     """
     # derivative of regularization term
-    reg_term, old_reg = regularization_derivative(psf_model, parms)
+    old_reg, reg_term = reg(psf_model, parms)
 
     # calculate derivative of nll term
     pool = multiprocessing.Pool(parms.Nthreads)
     mapfn = pool.map
 
+    steps = psf_model.copy() * parms.h
     argslist = [None] * parms.Ndata
     for i in range(parms.Ndata):
         argslist[i] = (data[i], shifts[None, i], psf_model, old_nlls[i],
-                       fit_parms[i], masks[i], parms)
+                       fit_parms[i], masks[i], steps, parms)
 
     results = list(mapfn(one_datum_nll_diff, [args for args in argslist]))
 
     Neff = 0
-    nll_diff_sums = np.zeros_like(psf_model)
+    derivatives = np.zeros_like(psf_model)
     for i in range(parms.Ndata):
-        nll_diff_sums += results[i]
+        derivatives += results[i]
         if np.any(results[i][0] != 0.0):
             Neff += 1
 
     if Neff == 0:
         derivatives = np.zeros_like(psf_model)
     else:
-        derivatives = nll_diff_sums / Neff / parms.h + reg_term
+        derivatives /= Neff
+    derivatives += reg_term
 
     # tidy up
     pool.close()
@@ -42,6 +44,35 @@ def get_derivatives(data, dq, shifts, psf_model, old_nlls, fit_parms, masks,
     pool.join()
 
     return derivatives, old_reg
+
+def reg(psf_model, parms):
+    """
+    Regularization and derivative.
+    """
+    eps = parms.eps
+    if (eps is None):
+        return np.zeros_like(psf_model)
+
+    psf_shape = psf_model.shape
+    d = np.zeros_like(psf_model)
+    r = np.zeros_like(psf_model)
+    for i in range(psf_shape[0]):
+        for j in range(psf_shape[1]): 
+            if i > 0:
+                r[i, j] += (psf_model[i, j] - psf_model[i - 1, j]) ** 2.
+                d[i, j] += 2. * (psf_model[i, j] - psf_model[i - 1, j]) 
+            if j > 0:
+                r[i, j] += (psf_model[i, j] - psf_model[i, j - 1]) ** 2.
+                d[i, j] += 2. * (psf_model[i, j] - psf_model[i, j - 1]) 
+            if i < psf_shape[0] - 1:
+                r[i, j] += (psf_model[i, j] - psf_model[i + 1, j]) ** 2.
+                d[i, j] += 2. * (psf_model[i, j] - psf_model[i + 1, j]) 
+            if j < psf_shape[1] - 1:
+                r[i, j] += (psf_model[i, j] - psf_model[i, j + 1]) ** 2.
+                d[i, j] += 2. * (psf_model[i, j] - psf_model[i, j + 1]) 
+    r *= eps
+    d *= eps
+    return r, d
 
 def regularization_derivative(psf_model, parms):
     """
@@ -55,12 +86,13 @@ def regularization_derivative(psf_model, parms):
     mapfn = pool.map
 
     # compute perturbed reg
+    hs = parms.h * psf_model.copy()
     argslist = [None] * parms.psf_model_shape[0] * parms.psf_model_shape[1]
     for i in range(parms.psf_model_shape[0]):
         for j in range(parms.psf_model_shape[1]):
             idx = i * parms.psf_model_shape[1] + j
             tmp_psf = psf_model.copy()
-            tmp_psf[i, j] += parms.h
+            tmp_psf[i, j] += hs[i, j]
             argslist[idx] = (tmp_psf, parms, (i, j))
     new_reg = np.array((mapfn(local_regularization,
                               [args for args in argslist])))
@@ -71,10 +103,10 @@ def regularization_derivative(psf_model, parms):
     pool.terminate()
     pool.join()
     
-    return (new_reg - old_reg) / parms.h, old_reg
+    return (new_reg - old_reg) / hs, old_reg
 
 def one_datum_nll_diff((datum, shift, psf_model, old_nll, fitparms, mask,
-                        parms)):
+                        steps, parms)):
     """
     Calculate the derivative for a single datum using forward differencing.
     """
@@ -96,20 +128,21 @@ def one_datum_nll_diff((datum, shift, psf_model, old_nll, fitparms, mask,
         bkg = fitparms[-1]
 
     # calculate the difference in nll, tweaking each psf parm.
-    nll_diff = np.zeros_like(psf_model)
+    steps = parms.h * psf_model
+    deriv = np.zeros_like(psf_model)
     for i in range(parms.psf_model_shape[0]):
         for j in range(parms.psf_model_shape[1]):
             temp_psf = psf_model.copy()
-            temp_psf[i, j] += parms.h
+            temp_psf[i, j] += steps[i, j]
 
             psf = render_psfs(temp_psf, shift, parms.patch_shape,
                               parms.psf_grid)[0]
 
             model = fitparms[0] * psf + bkg
-            new_nll = eval_nll(datum[mask], model[mask], parms)
-            nll_diff[i, j] = np.sum(new_nll - old_nll[mask])
+            diff = eval_nll(datum[mask], model[mask], parms) - old_nll[mask]
+            deriv[i, j] = np.sum(diff) / steps[i, j]
 
-    return nll_diff
+    return deriv
 
 def local_regularization((psf_model, parms, idx)):
     """
@@ -135,8 +168,7 @@ def local_regularization((psf_model, parms, idx)):
         ind[ind == psf_shape[0]] = psf_shape[0] - 1 # boundary foo
         for i in range(psf_shape[1]):
             diff = psf_model[ind, i] - psf_model[idx, i][:, None]
-            values = psf_model[idx, i][:, None]
-            reg[:, i] += eps * np.sum((diff / values) ** 2., axis=1)
+            reg[:, i] += eps * np.sum(diff ** 2., axis=1)
 
         # axis 1
         idx = np.arange(psf_shape[1])
@@ -145,11 +177,10 @@ def local_regularization((psf_model, parms, idx)):
         ind[ind == psf_shape[1]] = psf_shape[1] - 1 # boundary foo
         for i in range(psf_shape[0]):
             diff = psf_model[i, ind] - psf_model[i, idx][:, None]
-            values = psf_model[i, idx][:, None]
-            reg[i, :] += eps * np.sum((diff / values) ** 2., axis=1)
+            reg[i, :] += eps * np.sum(diff ** 2., axis=1)
     
         # l2 norm
-        reg += gamma * psf_model ** 2.
+        #reg += gamma * psf_model ** 2.
 
         # floor
         #reg += 1.e-1 / (1. + np.exp((psf_model - 4e-5) * 2.e5))
@@ -163,17 +194,17 @@ def local_regularization((psf_model, parms, idx)):
         ind[ind == -1] = 0 # lower edge case
         ind[ind == psf_shape[0]] = psf_shape[0] - 1 # upper edge case
         diff = psf_model[ind[0], idx[1]] - value
-        reg = eps * np.sum((diff / value) ** 2.)
+        reg = eps * np.sum(diff ** 2.)
 
         # axis 1
         ind = idx[:, None] + pm[None, :]
         ind[ind == -1] = 0 # lower edge case
         ind[ind == psf_shape[1]] = psf_shape[1] - 1 # upper edge case
         diff = psf_model[idx[0], ind[1]] - value
-        reg += eps * np.sum((diff / value) ** 2.)
+        reg += eps * np.sum(diff ** 2.)
 
         # l2 norm
-        reg += gamma * value ** 2.
+        #reg += gamma * value ** 2.
 
         # floor
         #reg += 1.e-1 / (1. + np.exp((value - 4e-5) * 2.e5) )
