@@ -1,12 +1,14 @@
 import numpy as np
 
+from construct_psf import psf_builder
+from patch_fitting import fit_patches
 from shifts_update import update_shifts
 from grid_definitions import get_grids
 
-def learn_psf(data, dq, initial_psf, clip_parms, noise_parms,
-              plotfilebase,
-              kernel_parms, patch_shape, min_patch_frac=0.75, core_size=5,
-              k=3, q=1.0, Nplot=20, plot=False,
+def learn_psf(data, dq, initial_psf, clip_parms, noise_parms, 
+              plotfilebase, kernel_parms, patch_shape,
+              min_patch_frac=0.75, core_size=5, bkg_tol=1.e-2,
+              k=3, q=1.0, Nplot=20, plot=True,
               final_clip=[1, 3.], background='constant', Nthreads=20,
               max_iter=20, max_nll=1.e10, shift_test_thresh=0.475):
     """
@@ -21,12 +23,14 @@ def learn_psf(data, dq, initial_psf, clip_parms, noise_parms,
         'Patch shape does not match data shape'
 
     # bundle parameters to be passed to other functions
-    parms = InferenceParms(k, q, plot, data.shape[0], Nplot, max_nll, Nthreads,
+    parms = InferenceParms(k, q, plot, data.shape[0], Nplot, bkg_tol, max_nll,
+                           Nthreads,
                            core_size, background, clip_parms, patch_shape,
                            noise_parms, plotfilebase, min_patch_frac,
                            initial_psf.shape, shift_test_thresh)
 
     # initialize
+    print 'Initialized with %d patches\n' % data.shape[0]
     initial_psf /= initial_psf.max()
     psf_model = initial_psf.copy()
     cost = np.Inf
@@ -35,25 +39,25 @@ def learn_psf(data, dq, initial_psf, clip_parms, noise_parms,
     parms.clip_parms = None
     shifts, nll = update_shifts(data[:, parms.core_ind], dq[:, parms.core_ind],
                                 psf_model, parms)
-    print shifts
-    print nll
-    assert 0
+    set_clip_parameters(clip_parms, parms, final_clip)
+    fit_parms, nll = fit_patches(data, dq, shifts, psf_model, parms)
+    nll = np.sum(nll, axis=1)
+    ind = nll < parms.max_nll
+    shifts = shifts[ind]
+    data = data[ind]
+    dq = dq[ind]
+    parms.data_ids = data[ind]
+    print '%d patches are ok under the initial model\n' % data.shape[0]
+    
+    # Build a new psf
+    psf_builder(data, dq, shifts, fit_parms, parms)
 
-    """
-    # run
-    while True:
-        # check that max iterations is not reached
-        if parms.iter >= max_iter:
-            return current_psf
-
-        # get shifts
-    """
 
 class InferenceParms(object):
     """
     Class for storing and referencing parameters used in PSF inference.
     """
-    def __init__(self, k, q, plot, Ndata, Nplot, max_nll, Nthreads,
+    def __init__(self, k, q, plot, Ndata, Nplot, bkg_tol, max_nll, Nthreads,
                  core_size, background, clip_parms, patch_shape,
                  noise_parms, plotfilebase, min_patch_frac, psf_model_shape,
                  shift_test_thresh):
@@ -63,6 +67,7 @@ class InferenceParms(object):
         self.plot = plot
         self.floor = noise_parms['floor']
         self.Nplot = Nplot
+        self.bkg_tol = bkg_tol
         self.max_nll = max_nll
         self.Nthreads = Nthreads
         self.core_size = core_size
@@ -74,7 +79,7 @@ class InferenceParms(object):
         self.shift_test_thresh = shift_test_thresh
 
         self.iter = 0
-        self.plot_data = False
+        self.plot_data = plot
         self.return_parms = False
         self.data_ids = np.arange(0, Ndata, dtype=np.int)
         self.min_pixels = np.ceil(min_patch_frac * patch_shape[0] *
@@ -105,7 +110,7 @@ class InferenceParms(object):
         self.core_ind = core_ind[xcore[0]:xcore[1], ycore[0]:ycore[1]].ravel()
 
         # grid defs
-        self.psf_grid, x = get_grids(patch_shape, psf_model_shape)
+        self.psf_grid, self.patch_grid = get_grids(patch_shape, psf_model_shape)
 
 def set_clip_parameters(clip_parms, parms, final_clip):
     """

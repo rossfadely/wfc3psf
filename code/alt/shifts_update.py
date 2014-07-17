@@ -42,7 +42,7 @@ def update_single_shift((p0, psf_model, datum, dq, parms)):
     # good as fmin, and quicker.
     res = fmin_powell(shift_loss, p0, full_output=True, disp=False,
                args=(psf_model, datum, dq, parms))
-    print res
+
     # if shift is near an edge test to see if it likes other side
     shift = res[0].copy()
     ind = np.abs(shift) > parms.shift_test_thresh
