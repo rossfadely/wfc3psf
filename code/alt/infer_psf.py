@@ -5,10 +5,14 @@ from patch_fitting import fit_patches
 from shifts_update import update_shifts
 from grid_definitions import get_grids
 
+import matplotlib.pyplot as pl
+from matplotlib.colors import LogNorm
+from matplotlib import cm
+
 def learn_psf(data, dq, initial_psf, clip_parms, noise_parms, 
-              plotfilebase, kernel_parms, patch_shape,
-              min_patch_frac=0.75, core_size=5, bkg_tol=1.e-2,
-              k=3, q=1.0, Nplot=20, plot=True,
+              plotfilebase, kernel_parms, patch_shape, knn=32,
+              min_patch_frac=0.75, core_size=5, nll_tol=1.e-5,
+              k=3, q=1.0, Nplot=20, plot=False, flann_precision=0.99,
               final_clip=[1, 3.], background='constant', Nthreads=20,
               max_iter=20, max_nll=1.e10, shift_test_thresh=0.475):
     """
@@ -23,10 +27,11 @@ def learn_psf(data, dq, initial_psf, clip_parms, noise_parms,
         'Patch shape does not match data shape'
 
     # bundle parameters to be passed to other functions
-    parms = InferenceParms(k, q, plot, data.shape[0], Nplot, bkg_tol, max_nll,
-                           Nthreads,
+    parms = InferenceParms(k, q, knn, plot, data.shape[0], Nplot, nll_tol,
+                           max_nll, Nthreads,
                            core_size, background, clip_parms, patch_shape,
-                           noise_parms, plotfilebase, min_patch_frac,
+                           noise_parms, kernel_parms, plotfilebase,
+                           min_patch_frac, flann_precision,
                            initial_psf.shape, shift_test_thresh)
 
     # initialize
@@ -40,7 +45,8 @@ def learn_psf(data, dq, initial_psf, clip_parms, noise_parms,
     shifts, nll = update_shifts(data[:, parms.core_ind], dq[:, parms.core_ind],
                                 psf_model, parms)
     set_clip_parameters(clip_parms, parms, final_clip)
-    fit_parms, nll = fit_patches(data, dq, shifts, psf_model, parms)
+    fit_parms, fit_vars, nll, masks = fit_patches(data, dq, shifts, psf_model,
+                                                  parms)
     nll = np.sum(nll, axis=1)
     ind = nll < parms.max_nll
     shifts = shifts[ind]
@@ -48,33 +54,68 @@ def learn_psf(data, dq, initial_psf, clip_parms, noise_parms,
     dq = dq[ind]
     parms.data_ids = data[ind]
     print '%d patches are ok under the initial model\n' % data.shape[0]
-    
-    # Build a new psf
-    psf_builder(data, dq, shifts, fit_parms, parms)
+    print 'Initial NLL is %0.6e' % np.sum(nll)
 
+    # Build a new psf
+    psf_model = psf_builder(data, masks, shifts, fit_parms, fit_vars, parms)
+
+    for blah in range(8):
+        parms.clip_parms = None
+        shifts, nll = update_shifts(data[:, parms.core_ind],
+                                    dq[:, parms.core_ind],
+                                    psf_model, parms)
+        print blah, nll.sum(), shifts[0], shifts[-1]
+        set_clip_parameters(clip_parms, parms, final_clip)
+        fit_parms, vars, nll, masks = fit_patches(data, dq, shifts, psf_model,
+                                                  parms)
+        nll = np.sum(nll, axis=1)
+        ind = nll < parms.max_nll
+        shifts = shifts[ind]
+        data = data[ind]
+        dq = dq[ind]
+        parms.data_ids = data[ind]
+        print 'New NLL is %0.6e' % np.sum(nll)
+        f=pl.figure(figsize=(16, 8))
+        pl.subplot(121)
+        pl.imshow(np.abs(psf_model), interpolation='nearest', origin='lower',
+                  norm=LogNorm(vmin=1.e-6, vmax=1.))
+        psf_model = psf_builder(data, masks, shifts, fit_parms, fit_vars, parms)
+        pl.colorbar(shrink=0.7)
+        pl.subplot(122)
+        pl.imshow(np.abs(psf_model), interpolation='nearest', origin='lower',
+                  norm=LogNorm(vmin=1.e-6, vmax=1.))
+        pl.colorbar(shrink=0.7)
+        print psf_model[50, 50]
+        print psf_model.max()
+        f.savefig('../../plots/foo.png')
+    assert 0
 
 class InferenceParms(object):
     """
     Class for storing and referencing parameters used in PSF inference.
     """
-    def __init__(self, k, q, plot, Ndata, Nplot, bkg_tol, max_nll, Nthreads,
+    def __init__(self, k, q, knn, plot, Ndata, Nplot, nll_tol, max_nll, Nthreads,
                  core_size, background, clip_parms, patch_shape,
-                 noise_parms, plotfilebase, min_patch_frac, psf_model_shape,
+                 noise_parms, kernel_parms, plotfilebase, min_patch_frac,
+                 flann_precision, psf_model_shape, 
                  shift_test_thresh):
         self.k = k
         self.q = q
+        self.knn = knn
         self.gain = noise_parms['gain']
         self.plot = plot
         self.floor = noise_parms['floor']
         self.Nplot = Nplot
-        self.bkg_tol = bkg_tol
+        self.nll_tol = nll_tol
         self.max_nll = max_nll
         self.Nthreads = Nthreads
         self.core_size = core_size
         self.background = background
         self.clip_parms = clip_parms
         self.patch_shape = patch_shape
+        self.kernel_parms = kernel_parms
         self.plotfilebase = plotfilebase
+        self.flann_precision = flann_precision
         self.psf_model_shape = psf_model_shape
         self.shift_test_thresh = shift_test_thresh
 

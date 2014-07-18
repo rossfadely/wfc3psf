@@ -18,10 +18,8 @@ def get_grids(patch_shape, psf_shape, core_shape=None):
         shape = patch_shape
     xsize = (shape[0] - 1) / 2.
     ysize = (shape[1] - 1) / 2.
-    yp, xp = np.meshgrid(np.linspace(-ysize, ysize,
-                                      shape[1]).astype(np.int),
-                         np.linspace(-xsize, xsize,
-                                      shape[0]).astype(np.int))
+    xp, yp = np.meshgrid(np.linspace(-xsize, xsize, shape[0]),
+                         np.linspace(-ysize, ysize, shape[1]))
     patch_grid = (xp, yp)
 
     return psf_grid, patch_grid

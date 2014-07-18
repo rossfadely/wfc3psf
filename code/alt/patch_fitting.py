@@ -10,43 +10,53 @@ def fit_patches(data, dq, shifts, psf_model, parms, old_fit_parms=None):
     """
     # initialize
     nll = np.zeros_like(data)
+    masks = np.zeros_like(data, dtype=np.bool)
     if parms.background == None:            
         fit_parms = np.zeros(data.shape[0])
     elif parms.background == 'constant':
         fit_parms = np.zeros((data.shape[0], 2))
     else:
+        assert 0, 'no linear bkgs, need to implement uncertainties'
         fit_parms = np.zeros((data.shape[0], 4))
+    fit_vars = np.zeros_like(fit_parms)
 
     psfs = render_psfs(psf_model, shifts, parms.patch_shape, parms.psf_grid,
                        parms.k)
 
     for i in range(data.shape[0]):
-        dlt_bkg = np.inf
+        dlt_nll = np.inf
         if old_fit_parms == None:
-            fp, bkg, ind = fit_single_patch(data[i], psfs[i], dq[i], parms)
+            fp, fv, bkg, ind = fit_single_patch(data[i], psfs[i], dq[i], parms)
         else:
             bkg = make_background(data[i], old_fit_parms[i], parms.background)
             model = old_fit_parms[i][0] * psfs[i] + bkg
             nm = parms.floor + parms.gain * np.abs(model)
-            fp, bkg, ind = fit_single_patch(data[i], psfs[i], dq[i], parms,
-                                            var=nm)
-            
+            fp, fv, bkg, ind = fit_single_patch(data[i], psfs[i], dq[i], parms,
+                                                var=nm)
+
         model = fp[0] * psfs[i] + bkg
         nm = parms.floor + parms.gain * np.abs(model)
-        while dlt_bkg > parms.bkg_tol:
-            fp, nb, ind = fit_single_patch(data[i], psfs[i], dq[i], parms,
+        cur_nll = np.sum(patch_nll(data[i][ind], model[ind], parms))
+        cur_fp = fp
+        cur_fv = fv
+        while dlt_nll > parms.nll_tol:
+            fp, fv, bkg, idx = fit_single_patch(data[i], psfs[i], dq[i], parms,
                                            var=nm)
             model = fp[0] * psfs[i] + bkg
             nm = parms.floor + parms.gain * np.abs(model)
-            dlt_bkg = np.sum(np.abs(nb - bkg) / np.abs(bkg))
-            bkg = nb
-        fit_parms[i] = fp
+            new_nll = np.sum(patch_nll(data[i][idx], model[idx], parms))
+            dlt_nll = cur_nll - new_nll
+            if dlt_nll > 0:
+                ind = idx
+                cur_fp = fp
+                cur_fv = fv
+                cur_nll = new_nll
 
-        # get nll
-        if (model[ind].size >= parms.min_pixels):
-            nll[i, ind] = patch_nll(data[i][ind], model[ind], parms)
-        else:
-            nll[i] = parms.max_nll
+        assert cur_nll < parms.max_nll
+        nll[i, ind] = cur_nll
+        masks[i] = ind
+        fit_parms[i] = cur_fp
+        fit_vars[i] = cur_fv
 
         if parms.plot_data:
             # get pre-clip nll
@@ -60,10 +70,12 @@ def fit_patches(data, dq, shifts, psf_model, parms, old_fit_parms=None):
                 ind = parms.flags.ravel() != 1
             old_nll = np.zeros(data.shape[1])
             old_nll[ind] = patch_nll(data[i][ind], parms.old_model[ind], parms)
+            
             # plot the data
+            t = time.time()
             plot_data(i, data[i], model, bkg, nll[i], old_nll, parms)
 
-    return fit_parms, nll
+    return fit_parms, fit_vars, nll, masks
 
 def patch_nll(data, model, parms):
     """
@@ -138,7 +150,6 @@ def fit_single_patch(data, psf, dq, parms, var=None):
             ind = 1 - ind.reshape(parms.patch_shape)
             idx = grow_mask(condition)
             if parms.plot_data:
-                print 'HERE'
                 parms.flags = ind.copy()
                 parms.flags[idx] = 3
                 parms.flags[condition] = 2
@@ -153,7 +164,9 @@ def fit_single_patch(data, psf, dq, parms, var=None):
                 fit_parms = np.zeros(A.shape[1])
             bkg = make_background(data, fit_parms, background)
 
-    return fit_parms, bkg, ind
+    fit_vars = np.diagonal(lh)
+
+    return fit_parms, fit_vars, bkg, ind
 
 def make_background(data, fit_parms, background):
     """
@@ -163,7 +176,7 @@ def make_background(data, fit_parms, background):
         bkg = 0.0
     elif background == 'constant':
         if len(fit_parms.shape) > 1:
-            bkg = np.ones_like(data) * fit_parms[:, -1][:, None, None]
+            bkg = np.ones_like(data) * fit_parms[:, -1][:, None]
         else:
             bkg = np.ones_like(data) * fit_parms[-1]
     elif background == 'linear':

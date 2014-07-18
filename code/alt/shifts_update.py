@@ -69,7 +69,7 @@ def shift_loss(shift, psf_model, datum, dq, parms):
                       parms.psf_grid, parms.k)
 
     # the fit
-    fit_parms, bkg, ind = fit_single_patch(datum, psf[0], dq, parms)
+    fit_parms, fit_vars, bkg, ind = fit_single_patch(datum, psf[0], dq, parms)
     model = fit_parms[0] * psf[0] + bkg
 
     return np.sum(patch_nll(datum[ind], model[ind], parms))
