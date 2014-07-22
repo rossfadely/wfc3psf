@@ -59,15 +59,16 @@ def learn_psf(data, dq, initial_psf, clip_parms, noise_parms,
     # Build a new psf
     psf_model = psf_builder(data, masks, shifts, fit_parms, fit_vars, parms)
 
-    for blah in range(8):
+    for blah in range(12):
         parms.clip_parms = None
         shifts, nll = update_shifts(data[:, parms.core_ind],
                                     dq[:, parms.core_ind],
                                     psf_model, parms)
         print blah, nll.sum(), shifts[0], shifts[-1]
         set_clip_parameters(clip_parms, parms, final_clip)
-        fit_parms, vars, nll, masks = fit_patches(data, dq, shifts, psf_model,
-                                                  parms)
+        fit_parms, fit_vars, nll, masks = fit_patches(data, dq, shifts,
+                                                      psf_model,
+                                                      parms)
         nll = np.sum(nll, axis=1)
         ind = nll < parms.max_nll
         shifts = shifts[ind]
